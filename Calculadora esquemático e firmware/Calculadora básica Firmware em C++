@@ -1,0 +1,357 @@
+Código feito em C++
+
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <Keypad.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+
+// Configuração do WI-FI
+
+const char* ssid = "Nome_da_sua_rede";
+const char* senha = "Senha_da_sua_rede";
+
+// Configuração do CallMeBot (por WhatsApp)
+// Primeiro passo, entre no site: https://www.callmebot.com/ e procure pelo
+// telefone do WhatsApp da plataforma e salve-o no aplicativo.
+// Segundo passo, envie a mensagem "I allow callmebot to send me messages"
+// para o contato adicionado anteriormente.
+// Terceiro passo, será necessário esperar para receber o "apikey" único como
+// resposta e cole-o na área reservada abaixo.
+// Quarto passo, coloque o número de WhatsApp do dono da calculadora com
+// o código do país e o DDD, sem espaços e/ou símbolos.
+
+String numeroWhatsApp   = "55DDDNúmero"; // Exemplo: "5521987654321"
+String apiKeyCallMeBot = "Seu_APIKEY_aqui";
+
+// Configuração do Display LCD
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// Configuração do teclado matricial
+
+const byte ROWS = 4;
+const byte COLS = 4;
+char keys[ROWS][COLS] = {
+  {'1', '2', '3', 'A'},
+  {'4', '5', '6', 'B'},
+  {'7', '8', '9', 'C'},
+  {'*', '0', '#', 'D'}
+};
+
+// Pinos do ESP32
+
+byte rowPins[ROWS] = {13, 14, 27, 26};
+byte colPins[COLS] = {25, 33, 32, 4};
+
+// Cria o objeto do teclado
+
+Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
+
+// Variáveis da calculadora
+
+String num1 = "";
+String num2 = "";
+char operacao = ' ';
+boolean resultadoExibido = false;
+const byte MAX_DIGITOS = 10;
+
+// Controle do BackLight
+
+unsigned long ultimaTecla = 0;
+const unsigned long tempoBacklight = 10000;
+// Acima, depois de 10 segundos habilita o backlight
+boolean backlightLigado = true;
+
+// Controle de desligamento automático
+
+const unsigned long tempoDesligar = 30000; 
+// Acima, depois de 40 segundos = 10 seg do backlight + 30 seg, o LCD apaga
+boolean calculadoraLigada = true;
+
+// Para guardar a última conta feita
+
+String ultimaContaLinha1 = "";
+String ultimaContaLinha2 = "";
+boolean existeUltimaConta = false;
+
+// Função de limpeza parcial do Display
+
+void limparDisplay() {
+  lcd.setCursor(0, 0);
+  lcd.print("                ");
+  lcd.setCursor(0, 1);
+  lcd.print("                ");
+}
+
+// Função para limpar a calculadora
+
+void limparTudo() {
+  num1 = "";
+  num2 = "";
+  operacao = ' ';
+  resultadoExibido = false;
+
+  limparDisplay();
+  lcd.setCursor(0, 0);
+  ultimaTecla = millis();
+}
+
+// Para codificar o texto para URL (espaços e símbolos usados na conta)
+
+String urlEncode(String texto) {
+  String resultado = "";
+  for (size_t i = 0; i < texto.length(); i++) {
+    char c = texto.charAt(i);
+    if (isalnum(c)) {
+      resultado += c;
+    } else if (c == ' ') {
+      resultado += "%20";
+    } else {
+      char buf[5];
+      sprintf(buf, "%%%02X", c);
+      resultado += buf;
+    }
+  }
+  return resultado;
+}
+
+// Função para enviar o histórico da conta para o WhatsApp
+
+void enviarHistoricoWhatsApp(String mensagem) {
+  if (WiFi.status() != WL_CONNECTED) {
+    return; // sem Wi-Fi, não há como enviar — a calculadora desliga normalmente mesmo assim
+  }
+  HTTPClient http;
+  String url = "https://api.callmebot.com/whatsapp.php?phone=" + numeroWhatsApp +
+               "&text=" + urlEncode(mensagem) +
+               "&apikey=" + apiKeyCallMeBot;
+  http.begin(url);
+  http.GET();
+  http.end();
+}
+
+// Função para realizar o cálculo
+
+void calcularResultado() {
+  if (num1.length() == 0 || num2.length() == 0) {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Dados invalidos");
+    delay(1500);
+    limparTudo();
+    return;
+  }
+  float numero1 = num1.toFloat();
+  float numero2 = num2.toFloat();
+  float resultado = 0;
+  switch (operacao) {
+    case 'A': resultado = numero1 + numero2; break;
+    case 'B': resultado = numero1 - numero2; break;
+    case 'C': resultado = numero1 * numero2; break;
+    case 'D':
+      if (numero2 == 0) {
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("Erro:");
+        lcd.setCursor(0, 1);
+        lcd.print("Divisao por 0");
+        delay(2000);
+        limparTudo();
+        return;
+      }
+      resultado = numero1 / numero2;
+      break;
+    default:
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Operacao invalida");
+      delay(1500);
+      limparTudo();
+      return;
+  }
+
+  // Para montar o texto da operação
+
+  char simboloOp = ' ';
+  switch (operacao) {
+    case 'A': simboloOp = '+'; break;
+    case 'B': simboloOp = '-'; break;
+    case 'C': simboloOp = 'x'; break;
+    case 'D': simboloOp = '/'; break;
+  }
+  String textoResultado;
+  if (resultado == (long)resultado) {
+    textoResultado = String((long)resultado);
+  } else {
+    textoResultado = String(resultado, 2);
+  }
+
+// Guardando a conta feita que será enviada ao WhatsApp quando a calculadora
+// desligar
+
+  ultimaContaLinha1 = num1 + simboloOp + num2;
+  ultimaContaLinha2 = "=" + textoResultado;
+  existeUltimaConta = true;
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(ultimaContaLinha1);
+  lcd.setCursor(0, 1);
+  lcd.print(ultimaContaLinha2);
+  resultadoExibido = true;
+}
+
+// Função para desligar a calculadora
+
+void desligarCalculadora() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Desligando...");
+
+// Envia o histórico da última conta feita para o WhatsApp do dono
+
+  if (existeUltimaConta) {
+    lcd.setCursor(0, 1);
+    lcd.print("Enviando hist.");
+    String mensagem = "Calculadora desligou. Ultima conta: " +
+                       ultimaContaLinha1 + " " + ultimaContaLinha2;
+    enviarHistoricoWhatsApp(mensagem);
+  }
+
+  delay(800);
+
+  lcd.clear();
+  lcd.noBacklight();
+  lcd.noDisplay();
+
+  backlightLigado = false;
+  calculadoraLigada = false;
+}
+
+// Função para religar a calculadora
+
+void ligarCalculadora() {
+  lcd.display();
+  lcd.backlight();
+  backlightLigado = true;
+  calculadoraLigada = true;
+
+  // Reexibe o resultado da última conta feita, sem apagar a tela
+
+  if (existeUltimaConta) {
+    lcd.setCursor(0, 0);
+    lcd.print(ultimaContaLinha1);
+    lcd.setCursor(0, 1);
+    lcd.print(ultimaContaLinha2);
+    resultadoExibido = true;
+  } else {
+    limparTudo();
+  }
+  ultimaTecla = millis();
+}
+void setup() {
+  lcd.init();
+  lcd.backlight();
+  lcd.setCursor(0, 0);
+  lcd.print("Carregando...");
+
+  // Conecta ao Wi-Fi
+
+  lcd.setCursor(0, 1);
+  lcd.print("Conectando WiFi");
+  WiFi.begin(ssid, senha);
+
+  unsigned long inicioTentativa = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - inicioTentativa < 10000) {
+    delay(300);
+  }
+  limparDisplay();
+  lcd.setCursor(0, 0);
+  if (WiFi.status() == WL_CONNECTED) {
+    lcd.print("WiFi conectado");
+  } else {
+    lcd.print("WiFi falhou");
+  }
+  delay(1200);
+  limparTudo();
+  ultimaTecla = millis();
+}
+void loop() {
+  char key = keypad.getKey();
+
+  // A calculadora está a espera de uma tecla ser digitada para religar
+
+  if (!calculadoraLigada) {
+    if (key != NO_KEY) {
+      ligarCalculadora();
+    }
+    return;
+  }
+
+  // Desligamento automático por inatividade
+
+  if (millis() - ultimaTecla > tempoDesligar) {
+    desligarCalculadora();
+    return;
+  }
+
+  // Controle do BackLight
+
+  if (backlightLigado && (millis() - ultimaTecla > tempoBacklight)) {
+    lcd.noBacklight();
+    backlightLigado = false;
+  }
+  if (key != NO_KEY) {
+    ultimaTecla = millis();
+    if (!backlightLigado) {
+      lcd.backlight();
+      backlightLigado = true;
+    }
+    if (key == '*') {
+      limparTudo();
+      return;
+    }
+    if (key == '#') {
+      calcularResultado();
+      return;
+    }
+    if (key == 'A' || key == 'B' || key == 'C' || key == 'D') {
+      if (num1.length() > 0 && operacao == ' ') {
+        operacao = key;
+        lcd.setCursor(0, 1);
+        switch (operacao) {
+          case 'A': lcd.print("+"); break;
+          case 'B': lcd.print("-"); break;
+          case 'C': lcd.print("x"); break;
+          case 'D': lcd.print("/"); break;
+        }
+      }
+      return;
+    }
+    if (key >= '0' && key <= '9') {
+      if (resultadoExibido) {
+        limparTudo();
+        resultadoExibido = false;
+      }
+      if (operacao == ' ') {
+        if (num1.length() < MAX_DIGITOS) {
+          num1 += key;
+          lcd.setCursor(0, 0);
+          lcd.print(num1);
+        }
+      } else {
+        if (num2.length() < MAX_DIGITOS) {
+          num2 += key;
+          lcd.setCursor(0, 1);
+          switch (operacao) {
+            case 'A': lcd.print("+"); break;
+            case 'B': lcd.print("-"); break;
+            case 'C': lcd.print("x"); break;
+            case 'D': lcd.print("/"); break;
+          }
+          lcd.print(num2);
+        }
+      }
+    }
+  }
+}
